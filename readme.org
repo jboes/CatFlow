@@ -8,14 +8,14 @@
 * Introduction
 This document is meant as a staging ground for experimenting with workflow design in Fireworks and ASE.
 
-
 * TODO: Installing a local MongoDB
 In order to work the following examples, we need a local installation of MongoDB.
 
 TODO - setup a simple tutorial for Linux.
 
 
-* Performing a relaxation through ASE
+* Performing a relaxation
+** Using EMT in ASE
 ASE has integrations setup for a large variety of [[https://wiki.fysik.dtu.dk/ase/ase/calculators/calculators.html][calculators]]. These calculators are designed in such a way that they can be interchanged quickly and easily with the other simulation operations available in ASE.
 
 Below is a crude implementation of an equation of state calculation which performs a series of calculations at a high-resolution and simply takes the lowest value. This is suitable for EMT, but 250 calculations would be far too many for a DFT minimization. However, this is just for demonstrating the workflow later on.
@@ -25,11 +25,11 @@ from ase.calculators.emt import EMT
 from catkit.build import bulk
 import numpy as np
 
-lat = np.arange(3.77, 4.0, 0.01)
+lat = np.arange(2.6, 2.7, 0.01)
 
 nrg = np.zeros(lat.shape)
 for i, a in enumerate(lat):
-    atoms = bulk('Pd', a=a, primitive=True)
+    atoms = bulk('Al', a=a, crystalstructure='sc', primitive=True)
     atoms.set_calculator(EMT())
     nrg[i] = atoms.get_potential_energy()
 
@@ -38,7 +38,7 @@ minlat = lat[nrg.argmin()]
 import matplotlib.pyplot as plt
 plt.figure(figsize=(6, 4))
 plt.plot(lat, nrg)
-plt.text(minlat, 0.05, 'Minimum: {:.2f}'.format(minlat))
+plt.text(minlat, 0.282, 'Minimum: {:.2f}'.format(minlat))
 plt.xlabel(r'Lattice Constant ($\AA$)')
 plt.ylabel('Total Energy (eV)')
 plt.tight_layout()
@@ -51,9 +51,19 @@ plt.savefig('./docs/images/equation-of-state.png')
 
 [[./docs/images/equation-of-state.png]]
 
-Next, lets put the main function into 
+** Using Fireworks
+Next, lets put the main function into the class structure which Fireworks utilizes. Once done, we write the file out to the temporary directory =tutorial= along with an =__init__.py= file so python will find it from this execution directory.
 
-#+BEGIN_SRC python :results output org drawer :tangle fw_tutorials/eos.py :shebang #!/usr/bin/env python
+#+BEGIN_SRC python :results output org drawer
+import os
+
+os.mkdir('tutorial')
+open('tutorial/__init__.py', 'w').close()
+#+END_SRC
+
+Since this document is made in emacs org-mode, I simply tangle out the following script into the =tutorial/eos.py= file with an appropriate shebang.
+
+#+BEGIN_SRC python :results output org drawer :tangle tutorial/eos.py :shebang #!/usr/bin/env python
 from fireworks.core.firework import FWAction, FiretaskBase
 from ase.calculators.emt import EMT
 from catkit.build import bulk
@@ -61,69 +71,927 @@ import numpy as np
 
 
 class EOSTask(FiretaskBase):
-    '''Run a simple Equation of State. Takes a span of lattice constants
+    """Run a simple Equation of State. Takes a span of lattice constants
     and returns the origional.
 
     Parameters
     ----------
+    metal : str
+        Chemical species to simulate.
+    structure : str
+        A metal structure accepted by CatFlow.
     span : list (2,)
         Maximum and minimum values of of the equation of state.
-    '''
+    """
     _fw_name = 'Equation of state v0.0'
-    optional_params = ['span']
+    optional_params = ['metal', 'structure', 'span']
 
     # This is a necessary function which is called by FWAction
     def run_task(self, fw_spec):
         # First, we collect the functions varaibles
-        span = fw_spec.get('span', [3, 4.5])
+        metal = fw_spec.get('metal', 'Al')
+        structure = fw_spec.get('structure', 'fcc')
+        span = fw_spec.get('span', [2, 5])
 
         # Here's the body of the function
         lat = np.arange(span[0], span[1], 0.01)
 
         nrg = np.zeros(lat.shape)
         for i, a in enumerate(lat):
-            atoms = bulk('Pd', a=a, primitive=True)
+            atoms = bulk(
+                metal, a=a,
+                crystalstructure=structure,
+                primitive=True)
             atoms.set_calculator(EMT())
             nrg[i] = atoms.get_potential_energy()
 
         minlat = lat[nrg.argmin()]
+        update_spec = fw_spec.update({'minlat': minlat})
 
         return FWAction(
             stored_data={'lat': lat.tolist(), 'nrg': nrg.tolist()},
-            update_spec={'minlat': minlat})
+            update_spec=fw_spec)
 #+END_SRC
 
-#+RESULTS:
-:RESULTS:
-:END:
+Unfortunately, to get Fireworks to call this function correctly requires that we modify the =fw_config.py= file that exists in the fireworks installation path. Not sure why they chose to do it this way, when a simple environment variable would have solved the problem.
 
-Now we can run the firetask by calling the the script.
+To bypass the problem from the comfort of our example script, we simply call the correct variable and add tutorial to it.
+
+Now we can run the FireTask by calling the script.
 
 #+BEGIN_SRC python :results output org drawer
-from fireworks import Firework, FWorker, LaunchPad
-from fireworks.core.rocket_launcher import rapidfire
 from catflow import Laminar
-from fw_tutorials.eos import EOSTask
+from fireworks import Firework
+from fireworks.core.rocket_launcher import rapidfire
+from tutorial.eos import EOSTask
+
+# Here's where we hack in our temporary executable directory.
+from fireworks.fw_config import USER_PACKAGES
+USER_PACKAGES += ['tutorial']
 
 flow = Laminar('localhost')
 launchpad = flow.launchpad
 launchpad.reset('', require_password=False)
 
-firework = Firework(EOSTask(), spec={'span': [3.77, 4.0]})
+firework = Firework(
+    EOSTask(),
+    spec={
+        'metal': 'Al',
+        'span': [2.6, 2.7],
+        'structure': 'sc'
+    })
 
 launchpad.add_wf(firework)
-rapidfire(launchpad, FWorker())
+rapidfire(launchpad)
 #+END_SRC
 
 #+RESULTS:
 :RESULTS:
-2019-01-22 04:23:02,716 INFO Performing db tune-up
-2019-01-22 04:23:02,724 INFO LaunchPad was RESET.
-2019-01-22 04:23:02,726 INFO Added a workflow. id_map: {-1: 1}
-2019-01-22 04:23:02,762 INFO Created new dir /home/jboes/research/catflow/launcher_2019-01-22-12-23-02-762066
-2019-01-22 04:23:02,762 INFO Launching Rocket
-2019-01-22 04:23:02,775 INFO RUNNING fw_id: 1 in directory: /home/jboes/research/catflow/launcher_2019-01-22-12-23-02-762066
-2019-01-22 04:23:02,780 INFO Task started: Equation of state v0.0.
-2019-01-22 04:23:03,365 INFO Task completed: Equation of state v0.0 
-2019-01-22 04:23:03,380 INFO Rocket finished
+2019-01-22 06:55:06,665 INFO Performing db tune-up
+2019-01-22 06:55:06,672 INFO LaunchPad was RESET.
+2019-01-22 06:55:06,675 INFO Added a workflow. id_map: {-1: 1}
+2019-01-22 06:55:06,762 INFO Created new dir /home/jboes/research/catflow/launcher_2019-01-22-14-55-06-762556
+2019-01-22 06:55:06,762 INFO Launching Rocket
+2019-01-22 06:55:06,774 INFO RUNNING fw_id: 1 in directory: /home/jboes/research/catflow/launcher_2019-01-22-14-55-06-762556
+2019-01-22 06:55:06,780 INFO Task started: Equation of state v0.0.
+2019-01-22 06:55:06,932 INFO Task completed: Equation of state v0.0 
+2019-01-22 06:55:06,945 INFO Rocket finished
 :END:
+
+Finally, we can check that our calculation finished correctly by producing the same figure as above.
+
+#+BEGIN_SRC python :results output org drawer
+from catflow import Laminar
+from fireworks.fw_config import USER_PACKAGES
+USER_PACKAGES += ['tutorial']
+
+flow = Laminar('localhost')
+launchpad = flow.launchpad
+
+fw = launchpad.get_fw_by_id(1)
+data = fw.launches[-1].action.stored_data
+minlat = fw.launches[-1].action.update_spec['minlat']
+
+lat = data['lat']
+nrg = data['nrg']
+
+import matplotlib.pyplot as plt
+plt.figure(figsize=(6, 4))
+plt.plot(lat, nrg)
+plt.text(minlat, 0.282, 'Minimum: {:.2f}'.format(minlat))
+plt.xlabel(r'Lattice Constant ($\AA$)')
+plt.ylabel('Total Energy (eV)')
+plt.tight_layout()
+plt.savefig('./docs/images/fw-equation-of-state.png')
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+:END:
+
+[[./docs/images/fw-equation-of-state.png]]
+
+All and all, setting up to run the same simple script required significantly more effort. Of course, this will need to be taken into account when deciding whether to execute a script through a workflow.
+
+Of course, there can be no automation without a workflow framework. Let's look at chaining tasks together for the next section.
+
+* Surface relaxation
+** ASE relaxation
+Surface relaxations are performed from a given bulk structure. In the future, it might be helpful to store the JSON friendly version of the atoms object so we can get the information we need to produce the slab simply an easily.
+
+However, this gives us a good opportunity to demonstrate the benefits of having created a workflow to perform our simple relaxation function. Since we have the code which was executed along with the input and output, we can simply reproduce the minimum energy structure ourselves.
+
+#+BEGIN_SRC python :results output org drawer
+from catflow import Laminar
+from catkit.build import bulk
+from catkit.build import surface
+from ase import Atom
+from fireworks.fw_config import USER_PACKAGES
+from ase.optimize import MDMin
+from ase.calculators.emt import EMT
+USER_PACKAGES += ['tutorial']
+
+flow = Laminar('localhost')
+launchpad = flow.launchpad
+
+fw = launchpad.get_fw_by_id(1)
+
+metal = fw.spec.get('metal')
+structure = fw.spec.get('structure')
+minlat = fw.launches[-1].action.update_spec['minlat']
+
+atoms = bulk(
+    metal,
+    a=minlat,
+    crystalstructure=structure,
+    primitive=True)
+
+slab = surface(
+    atoms,
+    size=(4, 2),
+    miller=(1, 0, 0),
+    fixed=1)
+
+# Now relax the slab
+slab.set_calculator(EMT())
+opt = MDMin(slab)
+opt.run(fmax=0.01)
+
+print('\nPositions:')
+print(slab.positions.round(3))
+print('\nEnergy:')
+print('{:.3f} eV'.format(slab.get_potential_energy()))
+
+slab.write(
+    './docs/images/Al-slab.png',
+    rotation='-70x',
+    show_unit_cell=2)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+       Step     Time          Energy         fmax
+MDMin:    0 06:55:18        3.833086        0.0130
+MDMin:    1 06:55:18        3.833073        0.0125
+MDMin:    2 06:55:18        3.833037        0.0111
+MDMin:    3 06:55:18        3.832989        0.0089
+
+Positions:
+[[0.    0.    8.662]
+ [2.66  0.    8.662]
+ [0.    2.66  8.662]
+ [2.66  2.66  8.662]
+ [0.    0.    6.   ]
+ [2.66  0.    6.   ]
+ [0.    2.66  6.   ]
+ [2.66  2.66  6.   ]]
+
+Energy:
+3.833 eV
+:END:
+
+[[./docs/images/Al-slab.png]]
+
+
+For all intents and purposes, this particular slab is already relaxed, at least according to the EMT calculator.
+
+** Using Fireworks
+Now lets try doing the same thing with Fireworks. This time, lets use =atoms_to_encode= to store the atoms object in a JSON readable format.
+
+We will put this function into =tutorial/surf.py=.
+
+#+BEGIN_SRC python :results output org drawer :tangle tutorial/surf.py :shebang #!/usr/bin/env python
+from fireworks.core.firework import FWAction, FiretaskBase
+from ase.calculators.emt import EMT
+from catkit.build import bulk
+from catkit.build import surface
+from ase.optimize import MDMin
+from catflow.utils import atoms_to_encode
+import numpy as np
+
+
+class MDMinTask(FiretaskBase):
+    """Perform a simple EMT relaxation with the MDmin minimizer.
+
+    Parameters
+    ----------
+    metal : str
+        Chemical species to simulate.
+    structure : str
+        A metal structure accepted by CatFlow.
+    minlat : float
+        The lattice constant in Angstroms associated with the minimum
+        energy structure.
+    """
+    _fw_name = 'MDmin surface relaxation v0.0'
+    optional_params = ['metal', 'structure', 'minlat']
+
+    # This is a necessary function which is called by FWAction
+    def run_task(self, fw_spec):
+        # First, we collect the functions varaibles
+        metal = fw_spec.get('metal', 'Al')
+        structure = fw_spec.get('structure', 'fcc')
+        minlat = fw_spec.get('minlat')
+
+        atoms = bulk(
+            metal,
+            a=minlat,
+            crystalstructure=structure,
+            primitive=True)
+
+        slab = surface(
+            atoms,
+            size=(4, 2),
+            miller=(1, 0, 0),
+            fixed=1)
+
+        slab.set_calculator(EMT())
+        opt = MDMin(slab)
+        opt.run(fmax=0.01)
+
+        return FWAction(
+            update_spec={
+                'slab': atoms_to_encode(slab),
+                'sites': slab._sites.positions.tolist()
+            })
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+:END:
+
+For this example, lets assume we wanted to be able to start the entire process from scratch.
+
+#+BEGIN_SRC python :results output org drawer
+from catflow import Laminar
+from fireworks import Firework, Workflow
+from fireworks.core.rocket_launcher import rapidfire
+from tutorial.eos import EOSTask
+from tutorial.surf import MDMinTask
+
+# Here's where we hack in our temporary executable directory.
+from fireworks.fw_config import USER_PACKAGES
+USER_PACKAGES += ['tutorial']
+
+flow = Laminar('localhost')
+launchpad = flow.launchpad
+launchpad.reset('', require_password=False)
+
+fw1 = Firework(
+    EOSTask(),
+    spec={
+        'metal': 'Al',
+        'span': [2.6, 2.7],
+        'structure': 'sc'
+    })
+fw2 = Firework(MDMinTask())
+
+wf = Workflow([fw1, fw2], {fw1: [fw2]})
+
+launchpad.add_wf(wf)
+rapidfire(launchpad)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+2019-01-22 07:42:10,010 INFO Performing db tune-up
+2019-01-22 07:42:10,017 INFO LaunchPad was RESET.
+2019-01-22 07:42:10,019 INFO Added a workflow. id_map: {-2: 1, -1: 2}
+2019-01-22 07:42:10,055 INFO Created new dir /home/jboes/research/catflow/launcher_2019-01-22-15-42-10-054998
+2019-01-22 07:42:10,055 INFO Launching Rocket
+2019-01-22 07:42:10,066 INFO RUNNING fw_id: 2 in directory: /home/jboes/research/catflow/launcher_2019-01-22-15-42-10-054998
+2019-01-22 07:42:10,072 INFO Task started: Equation of state v0.0.
+2019-01-22 07:42:10,229 INFO Task completed: Equation of state v0.0 
+2019-01-22 07:42:10,250 INFO Rocket finished
+2019-01-22 07:42:10,253 INFO Created new dir /home/jboes/research/catflow/launcher_2019-01-22-15-42-10-253250
+2019-01-22 07:42:10,253 INFO Launching Rocket
+2019-01-22 07:42:10,265 INFO RUNNING fw_id: 1 in directory: /home/jboes/research/catflow/launcher_2019-01-22-15-42-10-253250
+2019-01-22 07:42:10,269 INFO Task started: MDmin surface relaxation v0.0.
+       Step     Time          Energy         fmax
+MDMin:    0 07:42:10        3.833086        0.0130
+MDMin:    1 07:42:10        3.833073        0.0125
+MDMin:    2 07:42:10        3.833037        0.0111
+MDMin:    3 07:42:10        3.832989        0.0089
+2019-01-22 07:42:10,324 INFO Task completed: MDmin surface relaxation v0.0 
+2019-01-22 07:42:10,338 INFO Rocket finished
+:END:
+
+We can already see that we achieved the same relaxation steps in the standard output above.
+
+Let's double check by printing out the result from the database.
+
+#+BEGIN_SRC python :results output org drawer
+from catflow import Laminar
+from catflow.utils import encode_to_atoms
+from fireworks.fw_config import USER_PACKAGES
+USER_PACKAGES += ['tutorial']
+
+flow = Laminar('localhost')
+launchpad = flow.launchpad
+
+fw = launchpad.get_fw_by_id(1)
+encode = fw.launches[-1].action.update_spec['slab']
+# This retruns a list for trajectories by default
+slab = encode_to_atoms(encode)[-1]
+
+print('\nPositions:')
+print(slab.positions.round(3))
+print('\nEnergy:')
+print('{:.3f} eV'.format(slab.get_potential_energy()))
+
+slab.write(
+    './docs/images/fw-Al-slab.png',
+    rotation='-70x',
+    show_unit_cell=2)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+
+Positions:
+[[0.    0.    8.662]
+ [2.66  0.    8.662]
+ [0.    2.66  8.662]
+ [2.66  2.66  8.662]
+ [0.    0.    6.   ]
+ [2.66  0.    6.   ]
+ [0.    2.66  6.   ]
+ [2.66  2.66  6.   ]]
+
+Energy:
+3.833 eV
+:END:
+
+
+[[./docs/images/fw-Al-slab.png]]
+
+Once again, the result is identical.
+
+* Adsorbate relaxation
+** ASE relaxation
+the final stage of getting an adsorption energy calculation is computing the adsorption energy of some species on the surface of our slab. Since we are using the EMT calculator for simple demonstrative purposes, we are limited to the type of adsorbates we can add.
+
+For demonstration purposes, lets just use another Al atom.
+
+#+BEGIN_SRC python :results output org drawer
+from catflow import Laminar
+from catflow.utils import encode_to_atoms
+import numpy as np
+from ase import Atom
+from ase.calculators.emt import EMT
+from ase.optimize import MDMin
+from fireworks.fw_config import USER_PACKAGES
+USER_PACKAGES += ['tutorial']
+
+flow = Laminar('localhost')
+launchpad = flow.launchpad
+
+fw = launchpad.get_fw_by_id(1)
+encode = fw.launches[-1].action.update_spec['slab']
+slab = encode_to_atoms(encode)[-1]
+
+# I was sneaky and stored the sites for future use in the
+# example above.
+sites = np.array(fw.launches[-1].action.update_spec['sites'])
+# A simple way to add height to the site position
+sites[:, 2] += 1.5
+
+slab += Atom(symbol='Al', position=sites[-4])
+
+# Now relax the slab
+slab.set_calculator(EMT())
+opt = MDMin(slab)
+opt.run(fmax=0.01)
+
+print('\nPositions:')
+print(slab.positions.round(3))
+print('\nEnergy:')
+print('{:.3f} eV'.format(slab.get_potential_energy()))
+
+slab.write(
+    './docs/images/Al-adsslab.png',
+    rotation='-70x',
+    show_unit_cell=2)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+       Step     Time          Energy         fmax
+MDMin:    0 07:07:12        4.917957        2.6831
+MDMin:    1 07:07:12        4.701636        2.1150
+MDMin:    2 07:07:12        4.408360        0.9652
+MDMin:    3 07:07:12        4.293868        0.2725
+MDMin:    4 07:07:12        4.266348        0.2826
+MDMin:    5 07:07:12        4.262881        0.2497
+MDMin:    6 07:07:12        4.256619        0.1734
+MDMin:    7 07:07:12        4.251413        0.1014
+MDMin:    8 07:07:12        4.247297        0.0854
+MDMin:    9 07:07:12        4.244234        0.0381
+MDMin:   10 07:07:12        4.243007        0.0460
+MDMin:   11 07:07:12        4.242755        0.0347
+MDMin:   12 07:07:12        4.242550        0.0176
+MDMin:   13 07:07:12        4.242448        0.0123
+MDMin:   14 07:07:12        4.242363        0.0091
+
+Positions:
+[[-5.000e-03 -5.000e-03  8.663e+00]
+ [ 2.665e+00 -5.000e-03  8.663e+00]
+ [-5.000e-03  2.665e+00  8.663e+00]
+ [ 2.665e+00  2.665e+00  8.663e+00]
+ [ 0.000e+00  0.000e+00  6.000e+00]
+ [ 2.660e+00  0.000e+00  6.000e+00]
+ [ 0.000e+00  2.660e+00  6.000e+00]
+ [ 2.660e+00  2.660e+00  6.000e+00]
+ [ 1.330e+00  1.330e+00  1.071e+01]]
+
+Energy:
+4.242 eV
+:END:
+
+[[./docs/images/Al-adsslab.png]]
+
+** Using Fireworks
+Hopefully by this point this should be rather routine, so we will expand on some good design tips. The trick to producing a good task is to make it suitable general while simultaneously not making it overly complex.
+
+For relaxation we can achieve this by observation of the similarities between the functions we've called previously.
+
+We will put this function into =tutorial/relax.py=.
+
+#+BEGIN_SRC python :results output org drawer :tangle tutorial/relax.py :shebang #!/usr/bin/env python
+from fireworks.core.firework import FWAction, FiretaskBase
+from ase.calculators.emt import EMT
+from ase.optimize import MDMin
+from catflow.utils import atoms_to_encode, encode_to_atoms
+
+
+class GMDMinTask(FiretaskBase):
+    """Perform a simple EMT relaxation with the MDmin minimizer.
+
+    Parameters
+    ----------
+    slab : str
+        Encoded slab from :meth:`catflow.utils.atoms_to_encode` to
+        be relaxed
+    fmax : float
+        Maximum force constraint for the minimizer.
+    'spec_tag' : str
+        Name of the spec tag to store the relaxed slab under.
+    """
+    _fw_name = 'General MDMin surface relaxation v0.0'
+    optional_params = ['slab', 'fmax', 'spec_tag']
+
+    def run_task(self, fw_spec):
+        slab = encode_to_atoms(fw_spec.get('slab'))[-1]
+        spec_tag = fw_spec.get('spec_tag', 'slab')
+        fmax = fw_spec.get('fmax', 0.01)
+
+        slab.set_calculator(EMT())
+        opt = MDMin(slab)
+        opt.run(fmax=0.01)
+
+        return FWAction(
+            update_spec={
+                spec_tag: atoms_to_encode(slab),
+            })
+#+END_SRC
+
+This is not a perfect example of generalization because we've lost some information that we were producing with the previous function. Namely, the positions of the adsorption sites. However, these types of features are not always necessary and can always be added to a separate function to make the workflow more modular.
+
+Finally, we can execute the adsorbate relaxation. By generalizing the function, we end up writing a lot of the former code over again, but this time in the local script. Again, these functions can be made into their own Tasks and added to the list for execution if used frequently enough, just like any other python function.
+
+For expensive calculations, it's often not possible to re-initialize a workflow from scratch, especially while developing. So, in this example we demonstrate how an exiting Firework can be used to start a new workflow.
+
+#+BEGIN_SRC python :results output org drawer
+from catflow import Laminar
+from catflow.utils import atoms_to_encode, encode_to_atoms
+import numpy as np
+from ase import Atom
+from fireworks import Firework, Workflow, FWAction
+from fireworks.core.rocket_launcher import rapidfire
+from tutorial.relax import GMDMinTask
+
+# Here's where we hack in our temporary executable directory.
+from fireworks.fw_config import USER_PACKAGES
+USER_PACKAGES += ['tutorial']
+
+flow = Laminar('localhost')
+launchpad = flow.launchpad
+fw = launchpad.get_fw_by_id(1)
+encode = fw.launches[-1].action.update_spec['slab']
+
+encode = fw.launches[-1].action.update_spec['slab']
+slab = encode_to_atoms(encode)[-1]
+sites = np.array(fw.launches[-1].action.update_spec['sites'])
+sites[:, 2] += 1.5
+
+slab += Atom(symbol='Al', position=sites[-4])
+encode = atoms_to_encode(slab)
+
+new_fw = Firework(GMDMinTask(), spec={'slab': encode})
+
+launchpad.add_wf(new_fw)
+rapidfire(launchpad)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+2019-01-22 07:43:38,131 INFO Added a workflow. id_map: {-1: 3}
+2019-01-22 07:43:38,140 INFO Created new dir /home/jboes/research/catflow/launcher_2019-01-22-15-43-38-140421
+2019-01-22 07:43:38,140 INFO Launching Rocket
+2019-01-22 07:43:38,152 INFO RUNNING fw_id: 3 in directory: /home/jboes/research/catflow/launcher_2019-01-22-15-43-38-140421
+2019-01-22 07:43:38,157 INFO Task started: General MDMin surface relaxation v0.0.
+       Step     Time          Energy         fmax
+MDMin:    0 07:43:38        4.917957        2.6831
+MDMin:    1 07:43:38        4.701636        2.1150
+MDMin:    2 07:43:38        4.408360        0.9652
+MDMin:    3 07:43:38        4.293868        0.2725
+MDMin:    4 07:43:38        4.266348        0.2826
+MDMin:    5 07:43:38        4.262881        0.2497
+MDMin:    6 07:43:38        4.256619        0.1734
+MDMin:    7 07:43:38        4.251413        0.1014
+MDMin:    8 07:43:38        4.247297        0.0854
+MDMin:    9 07:43:38        4.244234        0.0381
+MDMin:   10 07:43:38        4.243007        0.0460
+MDMin:   11 07:43:38        4.242755        0.0347
+MDMin:   12 07:43:38        4.242550        0.0176
+MDMin:   13 07:43:38        4.242448        0.0123
+MDMin:   14 07:43:38        4.242363        0.0091
+2019-01-22 07:43:38,271 INFO Task completed: General MDMin surface relaxation v0.0 
+2019-01-22 07:43:38,283 INFO Rocket finished
+:END:
+
+Again, we can see that the standard output already contains the same relaxation trajectory as above. I will leave producing the output as a exercise.
+
+* Complete Nudged Elastic Band Workflow
+For our last example, lets look at producing a workflow which can execute a nudged elastic band calculations on any structure which can be reliably produced from the Tasks we've made so far. To do this, we're going to need a few more Tasks.
+
+** Task to produce ads-atom structure
+A nudged elastic band calculation requires a relax final and initial configuration in order to operate correctly. For the most part, we've completed this, but we need some way of choosing the sites to add the adatoms to. Let's make this user-specified in a function which mimics what we've done above.
+
+We will put this function into =tutorial/site.py=.
+
+#+BEGIN_SRC python :results output org drawer :tangle tutorial/site.py :shebang #!/usr/bin/env python
+from fireworks.core.firework import FWAction, FiretaskBase
+from ase.calculators.emt import EMT
+from ase.optimize import MDMin
+from catflow.utils import atoms_to_encode, encode_to_atoms
+from ase import Atom
+
+
+class SiteTask(FiretaskBase):
+    """Add an adsorabte to a user specified site.
+
+    Parameters
+    ----------
+    slab : str
+        Encoded slab from :meth:`catflow.utils.atoms_to_encode` to
+        have a site added to.
+    sites : list (N, 3)
+        Cartesian coordinates of the available adsorption sites.
+    site_id : int
+        The index of the site position to add the adsorbate to.
+    height : float
+        Initial height to place the adsorabte at.
+    symbol : str
+        Chemical symbol of the single atom adsorbate to add.
+    """
+    _fw_name = 'Ads placement v0.0'
+    optional_params = ['slab', 'sites', 'site_id', 'height', 'symbol']
+
+    def run_task(self, fw_spec):
+        slab = encode_to_atoms(fw_spec.get('slab'))[-1]
+        sites = fw_spec.get('sites')
+        site_id = fw_spec.get('site_id', 0)
+        height = fw_spec.get('height', 0)
+        symbol = fw_spec.get('symbol', 'Al')
+
+        pos = sites[site_id]
+        pos[2] += height
+        slab += Atom(symbol=symbol, position=pos)
+
+        return FWAction(
+            update_spec={
+                'slab': atoms_to_encode(slab),
+            })
+#+END_SRC
+
+Without some way of knowing which sites are which, this is not a very helpful function for high-throughput purposes. Handling these kinds of automation details are just one aspect of what makes the process of high-throughput implementations challenging.
+
+Next, we need to produce a series of guesses for where the path will be and pass that series of images to the NEB minimizer in ASE. We will do this in one shot in the following script.
+
+We will put this function into =tutorial/neb.py=.
+
+#+BEGIN_SRC python :results output org drawer :tangle tutorial/neb.py :shebang #!/usr/bin/env python
+from fireworks.core.firework import FWAction, FiretaskBase
+from ase.calculators.emt import EMT
+from ase.optimize import MDMin
+from catflow.utils import atoms_to_encode, encode_to_atoms
+from ase.neb import NEB
+
+
+class NEBTask(FiretaskBase):
+    """Perform a NEB relaxation.
+
+    Parameters
+    ----------
+    initial : str
+        Encoded slab from :meth:`catflow.utils.atoms_to_encode` to
+        use as initial NEB image.
+    final : str
+        Encoded slab from :meth:`catflow.utils.atoms_to_encode` to
+        use as final NEB image.
+    nimg : int
+        Number of images to include in the NEB path.
+    fmax : float
+        Maximum force convergence criteria.
+    """
+    _fw_name = 'NEB relaxation v0.0'
+    optional_params = ['initial', 'final', 'nimg', 'fmax']
+
+    def run_task(self, fw_spec):
+        initial = encode_to_atoms(fw_spec.get('initial'))[-1]
+        final = encode_to_atoms(fw_spec.get('final'))[-1]
+        nimg = fw_spec.get('nimg', 3)
+        fmax = fw_spec.get('fmax', 0.01)
+
+        images = [initial]
+        images += [initial.copy() for i in range(nimg)]
+        images += [final]
+
+        neb = NEB(images)
+        neb.interpolate('idpp')
+
+        for image in images[1:nimg+1]:
+            image.set_calculator(EMT())
+
+        optimizer = MDMin(neb, trajectory='A2B.traj')
+        optimizer.run(fmax=0.01)
+
+        return FWAction(
+            update_spec={
+                'neb': atoms_to_encode(neb.images),
+            })
+#+END_SRC
+
+By leveraging a tagging trick in the =GMDMinTask=, I don't need to include a separate task for the final and initial images, I can just change the =spec_tag= name as needed instead. This is convenient since the necessary operation in both cases is the same.
+
+#+BEGIN_SRC python :results output org drawer
+from catflow import Laminar
+from fireworks import Firework, Workflow
+from fireworks.core.rocket_launcher import rapidfire
+from tutorial.eos import EOSTask
+from tutorial.surf import MDMinTask
+from tutorial.site import SiteTask
+from tutorial.relax import GMDMinTask
+from tutorial.neb import NEBTask
+
+# Here's where we hack in our temporary executable directory.
+from fireworks.fw_config import USER_PACKAGES
+USER_PACKAGES += ['tutorial']
+
+flow = Laminar('localhost')
+launchpad = flow.launchpad
+launchpad.reset('', require_password=False)
+
+fw1 = Firework(
+    EOSTask(),
+    spec={
+        'metal': 'Al',
+        'span': [2.6, 2.7],
+        'structure': 'sc'
+    })
+fw2 = Firework(MDMinTask(), parents=[fw1])
+fw30 = Firework(
+    SiteTask(),
+    spec={'height': 1.5, 'symbol': 'Al', 'site_id': -4},
+    parents=[fw2])
+fw31 = Firework(
+    SiteTask(),
+    spec={'height': 1.5, 'symbol': 'Al', 'site_id': -3},
+    parents=[fw2])
+
+fw40 = Firework(GMDMinTask(), spec={'spec_tag': 'initial'}, parents=[fw30])
+fw41 = Firework(GMDMinTask(), spec={'spec_tag': 'final'}, parents=[fw31])
+
+fw5 = Firework(NEBTask(), spec={'nimg': 7}, parents=[fw40, fw41])
+
+wf = Workflow([fw1, fw2, fw30, fw31, fw40, fw41, fw5])
+
+launchpad.add_wf(wf)
+rapidfire(launchpad)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+2019-01-22 08:53:26,051 INFO Performing db tune-up
+2019-01-22 08:53:26,058 INFO LaunchPad was RESET.
+2019-01-22 08:53:26,061 INFO Added a workflow. id_map: {-7: 1, -6: 2, -5: 3, -4: 4, -3: 5, -2: 6, -1: 7}
+2019-01-22 08:53:26,099 INFO Created new dir /home/jboes/research/catflow/launcher_2019-01-22-16-53-26-099001
+2019-01-22 08:53:26,099 INFO Launching Rocket
+2019-01-22 08:53:26,111 INFO RUNNING fw_id: 7 in directory: /home/jboes/research/catflow/launcher_2019-01-22-16-53-26-099001
+2019-01-22 08:53:26,117 INFO Task started: Equation of state v0.0.
+2019-01-22 08:53:26,267 INFO Task completed: Equation of state v0.0 
+2019-01-22 08:53:26,289 INFO Rocket finished
+2019-01-22 08:53:26,292 INFO Created new dir /home/jboes/research/catflow/launcher_2019-01-22-16-53-26-292361
+2019-01-22 08:53:26,292 INFO Launching Rocket
+2019-01-22 08:53:26,303 INFO RUNNING fw_id: 6 in directory: /home/jboes/research/catflow/launcher_2019-01-22-16-53-26-292361
+2019-01-22 08:53:26,308 INFO Task started: MDmin surface relaxation v0.0.
+       Step     Time          Energy         fmax
+MDMin:    0 08:53:26        3.833086        0.0130
+MDMin:    1 08:53:26        3.833073        0.0125
+MDMin:    2 08:53:26        3.833037        0.0111
+MDMin:    3 08:53:26        3.832989        0.0089
+2019-01-22 08:53:26,364 INFO Task completed: MDmin surface relaxation v0.0 
+2019-01-22 08:53:26,389 INFO Rocket finished
+2019-01-22 08:53:26,392 INFO Created new dir /home/jboes/research/catflow/launcher_2019-01-22-16-53-26-392350
+2019-01-22 08:53:26,392 INFO Launching Rocket
+2019-01-22 08:53:26,405 INFO RUNNING fw_id: 5 in directory: /home/jboes/research/catflow/launcher_2019-01-22-16-53-26-392350
+2019-01-22 08:53:26,410 INFO Task started: Ads placement v0.0.
+2019-01-22 08:53:26,412 INFO Task completed: Ads placement v0.0 
+2019-01-22 08:53:26,432 INFO Rocket finished
+2019-01-22 08:53:26,436 INFO Created new dir /home/jboes/research/catflow/launcher_2019-01-22-16-53-26-436063
+2019-01-22 08:53:26,436 INFO Launching Rocket
+2019-01-22 08:53:26,447 INFO RUNNING fw_id: 4 in directory: /home/jboes/research/catflow/launcher_2019-01-22-16-53-26-436063
+2019-01-22 08:53:26,453 INFO Task started: Ads placement v0.0.
+2019-01-22 08:53:26,455 INFO Task completed: Ads placement v0.0 
+2019-01-22 08:53:26,470 INFO Rocket finished
+2019-01-22 08:53:26,473 INFO Created new dir /home/jboes/research/catflow/launcher_2019-01-22-16-53-26-472939
+2019-01-22 08:53:26,473 INFO Launching Rocket
+2019-01-22 08:53:26,486 INFO RUNNING fw_id: 3 in directory: /home/jboes/research/catflow/launcher_2019-01-22-16-53-26-472939
+2019-01-22 08:53:26,491 INFO Task started: General MDMin surface relaxation v0.0.
+       Step     Time          Energy         fmax
+MDMin:    0 08:53:26        4.917957        2.6831
+MDMin:    1 08:53:26        4.701636        2.1150
+MDMin:    2 08:53:26        4.408360        0.9652
+MDMin:    3 08:53:26        4.293868        0.2725
+MDMin:    4 08:53:26        4.266348        0.2826
+MDMin:    5 08:53:26        4.262881        0.2497
+MDMin:    6 08:53:26        4.256619        0.1734
+MDMin:    7 08:53:26        4.251413        0.1014
+MDMin:    8 08:53:26        4.247297        0.0854
+MDMin:    9 08:53:26        4.244234        0.0381
+MDMin:   10 08:53:26        4.243007        0.0460
+MDMin:   11 08:53:26        4.242755        0.0347
+MDMin:   12 08:53:26        4.242550        0.0176
+MDMin:   13 08:53:26        4.242448        0.0123
+MDMin:   14 08:53:26        4.242363        0.0091
+2019-01-22 08:53:26,603 INFO Task completed: General MDMin surface relaxation v0.0 
+2019-01-22 08:53:26,623 INFO Rocket finished
+2019-01-22 08:53:26,625 INFO Created new dir /home/jboes/research/catflow/launcher_2019-01-22-16-53-26-625854
+2019-01-22 08:53:26,626 INFO Launching Rocket
+2019-01-22 08:53:26,637 INFO RUNNING fw_id: 2 in directory: /home/jboes/research/catflow/launcher_2019-01-22-16-53-26-625854
+2019-01-22 08:53:26,642 INFO Task started: General MDMin surface relaxation v0.0.
+       Step     Time          Energy         fmax
+MDMin:    0 08:53:26        4.917957        2.6831
+MDMin:    1 08:53:26        4.701636        2.1150
+MDMin:    2 08:53:26        4.408360        0.9652
+MDMin:    3 08:53:26        4.293868        0.2725
+MDMin:    4 08:53:26        4.266348        0.2826
+MDMin:    5 08:53:26        4.262881        0.2497
+MDMin:    6 08:53:26        4.256619        0.1734
+MDMin:    7 08:53:26        4.251413        0.1014
+MDMin:    8 08:53:26        4.247297        0.0854
+MDMin:    9 08:53:26        4.244234        0.0381
+MDMin:   10 08:53:26        4.243007        0.0460
+MDMin:   11 08:53:26        4.242755        0.0347
+MDMin:   12 08:53:26        4.242550        0.0176
+MDMin:   13 08:53:26        4.242448        0.0123
+MDMin:   14 08:53:26        4.242363        0.0091
+2019-01-22 08:53:26,753 INFO Task completed: General MDMin surface relaxation v0.0 
+2019-01-22 08:53:26,768 INFO Rocket finished
+2019-01-22 08:53:26,771 INFO Created new dir /home/jboes/research/catflow/launcher_2019-01-22-16-53-26-771096
+2019-01-22 08:53:26,771 INFO Launching Rocket
+2019-01-22 08:53:26,781 INFO RUNNING fw_id: 1 in directory: /home/jboes/research/catflow/launcher_2019-01-22-16-53-26-771096
+2019-01-22 08:53:26,787 INFO Task started: NEB relaxation v0.0.
+       Step     Time          Energy         fmax
+MDMin:    0 08:53:26        4.544786        1.1125
+MDMin:    1 08:53:26        4.498394        0.8554
+MDMin:    2 08:53:26        4.432526        0.3155
+MDMin:    3 08:53:27        4.413617        0.1257
+MDMin:    4 08:53:27        4.409211        0.0988
+MDMin:    5 08:53:27        4.406408        0.0827
+MDMin:    6 08:53:27        4.404098        0.0628
+MDMin:    7 08:53:27        4.402613        0.0509
+MDMin:    8 08:53:27        4.402349        0.0650
+MDMin:    9 08:53:27        4.402452        0.0782
+MDMin:   10 08:53:27        4.401810        0.0429
+MDMin:   11 08:53:27        4.401546        0.0409
+MDMin:   12 08:53:27        4.401493        0.0409
+MDMin:   13 08:53:27        4.401444        0.0411
+MDMin:   14 08:53:27        4.401403        0.0410
+MDMin:   15 08:53:27        4.401373        0.0413
+MDMin:   16 08:53:27        4.401354        0.0416
+MDMin:   17 08:53:27        4.401344        0.0421
+MDMin:   18 08:53:27        4.401347        0.0436
+MDMin:   19 08:53:27        4.401421        0.0490
+MDMin:   20 08:53:27        4.401429        0.0482
+MDMin:   21 08:53:28        4.401345        0.0437
+MDMin:   22 08:53:28        4.401334        0.0417
+MDMin:   23 08:53:28        4.401333        0.0414
+MDMin:   24 08:53:28        4.401333        0.0411
+MDMin:   25 08:53:28        4.401333        0.0406
+MDMin:   26 08:53:28        4.401333        0.0406
+MDMin:   27 08:53:28        4.401333        0.0456
+MDMin:   28 08:53:28        4.401337        0.0504
+MDMin:   29 08:53:28        4.401365        0.0562
+MDMin:   30 08:53:28        4.401523        0.0588
+MDMin:   31 08:53:28        4.401354        0.0603
+MDMin:   32 08:53:28        4.401333        0.0605
+MDMin:   33 08:53:28        4.401333        0.0610
+MDMin:   34 08:53:28        4.401333        0.0611
+MDMin:   35 08:53:28        4.401333        0.0604
+MDMin:   36 08:53:28        4.401333        0.0586
+MDMin:   37 08:53:28        4.401336        0.0546
+MDMin:   38 08:53:28        4.401353        0.0509
+MDMin:   39 08:53:28        4.401333        0.0480
+MDMin:   40 08:53:29        4.401333        0.0466
+MDMin:   41 08:53:29        4.401333        0.0443
+MDMin:   42 08:53:29        4.401333        0.0413
+MDMin:   43 08:53:29        4.401333        0.0376
+MDMin:   44 08:53:29        4.401333        0.0333
+MDMin:   45 08:53:29        4.401333        0.0287
+MDMin:   46 08:53:29        4.401333        0.0258
+MDMin:   47 08:53:29        4.401333        0.0250
+MDMin:   48 08:53:29        4.401333        0.0234
+MDMin:   49 08:53:29        4.401333        0.0217
+MDMin:   50 08:53:29        4.401333        0.0207
+MDMin:   51 08:53:29        4.401333        0.0196
+MDMin:   52 08:53:29        4.401333        0.0183
+MDMin:   53 08:53:29        4.401333        0.0169
+MDMin:   54 08:53:29        4.401333        0.0154
+MDMin:   55 08:53:29        4.401333        0.0147
+MDMin:   56 08:53:29        4.401333        0.0187
+MDMin:   57 08:53:29        4.401333        0.0125
+MDMin:   58 08:53:30        4.401333        0.0122
+MDMin:   59 08:53:30        4.401333        0.0116
+MDMin:   60 08:53:30        4.401333        0.0111
+MDMin:   61 08:53:30        4.401333        0.0104
+MDMin:   62 08:53:30        4.401333        0.0100
+2019-01-22 08:53:30,268 INFO Task completed: NEB relaxation v0.0 
+2019-01-22 08:53:30,279 INFO Rocket finished
+:END:
+
+Once the script is finished, we can collect the energies from the final result and arrive at an estimated barrier of around 0.16 eV.
+
+#+BEGIN_SRC python :results output org drawer
+from catflow import Laminar
+from catflow.utils import encode_to_atoms
+import numpy as np
+from fireworks.fw_config import USER_PACKAGES
+USER_PACKAGES += ['tutorial']
+
+flow = Laminar('localhost')
+launchpad = flow.launchpad
+
+fw = launchpad.get_fw_by_id(1)
+encode = fw.launches[-1].action.update_spec['neb']
+images = encode_to_atoms(encode)
+
+nrg = np.empty(len(images))
+for i, image in enumerate(images):
+    nrg[i] = image.get_potential_energy()
+nrg -= nrg[0]
+
+import matplotlib.pyplot as plt
+plt.figure(figsize=(6, 4))
+plt.plot(nrg)
+plt.xlabel('Image number')
+plt.ylabel('Total Energy Difference (eV)')
+plt.tight_layout()
+plt.savefig('./docs/images/neb.png')
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+:END:
+
+[[./docs/images/neb.png]]
+
+* Summary
+These example are pretty useful for workflow testing and as an introduction for those looking to do something more ``useful'' than the examples on the Fireworks website demonstrate. However, they're rather limited in their ability to do anything very productive, mostly because most features were hard-coded in to save time (such as choice of ASE calculator).
+
+It's also important to note that while there's only one expected outcome here, there are numerous ways that these functions could easily go awry from the limited number of generalizations which were provided to the user. Initial guesses were chosen such that the basic algorithms being used here would converge.
+
+Still, I feel this successfully outlines some of the basic motivation for why one would want to consider implementing better tools for workflow management. These operations are so standard that they are probably performed hundreds, if not thousands of times daily around the world. The true potential in the implementation of high-throughput technique like this is in their ability to crystallize the communities comprehension of a topic into a series of algorithms.
+
+Of course, all of this effort is for not if the tools are not made open to the community and /as transparent as possible/ to interpret so that others can understand their implementation step-by-step. By dedicating time and effort to such algorithms, we can dramatically accelerate the rate which new researchers are able to understand and build upon complex ideas. It can also lead to reproducibility in scientific research which was not previously possible.
