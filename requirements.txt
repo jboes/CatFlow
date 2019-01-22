@@ -1,0 +1,5 @@
+catkit>=0.5.3
+numpy>=1.14
+ase>=3.17
+fireworks>=1.7
+sqlalchemy>=1.2

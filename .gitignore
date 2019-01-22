@@ -1,0 +1,8 @@
+*.ini
+*.pov
+#*
+.#*
+*.pyc
+*.db
+.pypirc
+.style.yapf

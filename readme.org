@@ -1,0 +1,129 @@
+#+Title: Examples of ASE Integration for Fireworks Workflows
+#+Author:Jacob Boes
+#+OPTIONS: toc:nil
+#+EXPORT_EXCLUDE_TAGS: noexport
+#+LATEX_HEADER: \usepackage{parskip} 
+#+LATEX_HEADER: \setlength{\parindent}{0em}
+
+* Introduction
+This document is meant as a staging ground for experimenting with workflow design in Fireworks and ASE.
+
+
+* TODO: Installing a local MongoDB
+In order to work the following examples, we need a local installation of MongoDB.
+
+TODO - setup a simple tutorial for Linux.
+
+
+* Performing a relaxation through ASE
+ASE has integrations setup for a large variety of [[https://wiki.fysik.dtu.dk/ase/ase/calculators/calculators.html][calculators]]. These calculators are designed in such a way that they can be interchanged quickly and easily with the other simulation operations available in ASE.
+
+Below is a crude implementation of an equation of state calculation which performs a series of calculations at a high-resolution and simply takes the lowest value. This is suitable for EMT, but 250 calculations would be far too many for a DFT minimization. However, this is just for demonstrating the workflow later on.
+
+#+BEGIN_SRC python :results output org drawer
+from ase.calculators.emt import EMT
+from catkit.build import bulk
+import numpy as np
+
+lat = np.arange(3.77, 4.0, 0.01)
+
+nrg = np.zeros(lat.shape)
+for i, a in enumerate(lat):
+    atoms = bulk('Pd', a=a, primitive=True)
+    atoms.set_calculator(EMT())
+    nrg[i] = atoms.get_potential_energy()
+
+minlat = lat[nrg.argmin()]
+
+import matplotlib.pyplot as plt
+plt.figure(figsize=(6, 4))
+plt.plot(lat, nrg)
+plt.text(minlat, 0.05, 'Minimum: {:.2f}'.format(minlat))
+plt.xlabel(r'Lattice Constant ($\AA$)')
+plt.ylabel('Total Energy (eV)')
+plt.tight_layout()
+plt.savefig('./docs/images/equation-of-state.png')
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+:END:
+
+[[./docs/images/equation-of-state.png]]
+
+Next, lets put the main function into 
+
+#+BEGIN_SRC python :results output org drawer :tangle fw_tutorials/eos.py :shebang #!/usr/bin/env python
+from fireworks.core.firework import FWAction, FiretaskBase
+from ase.calculators.emt import EMT
+from catkit.build import bulk
+import numpy as np
+
+
+class EOSTask(FiretaskBase):
+    '''Run a simple Equation of State. Takes a span of lattice constants
+    and returns the origional.
+
+    Parameters
+    ----------
+    span : list (2,)
+        Maximum and minimum values of of the equation of state.
+    '''
+    _fw_name = 'Equation of state v0.0'
+    optional_params = ['span']
+
+    # This is a necessary function which is called by FWAction
+    def run_task(self, fw_spec):
+        # First, we collect the functions varaibles
+        span = fw_spec.get('span', [3, 4.5])
+
+        # Here's the body of the function
+        lat = np.arange(span[0], span[1], 0.01)
+
+        nrg = np.zeros(lat.shape)
+        for i, a in enumerate(lat):
+            atoms = bulk('Pd', a=a, primitive=True)
+            atoms.set_calculator(EMT())
+            nrg[i] = atoms.get_potential_energy()
+
+        minlat = lat[nrg.argmin()]
+
+        return FWAction(
+            stored_data={'lat': lat.tolist(), 'nrg': nrg.tolist()},
+            update_spec={'minlat': minlat})
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+:END:
+
+Now we can run the firetask by calling the the script.
+
+#+BEGIN_SRC python :results output org drawer
+from fireworks import Firework, FWorker, LaunchPad
+from fireworks.core.rocket_launcher import rapidfire
+from catflow import Laminar
+from fw_tutorials.eos import EOSTask
+
+flow = Laminar('localhost')
+launchpad = flow.launchpad
+launchpad.reset('', require_password=False)
+
+firework = Firework(EOSTask(), spec={'span': [3.77, 4.0]})
+
+launchpad.add_wf(firework)
+rapidfire(launchpad, FWorker())
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+2019-01-22 04:23:02,716 INFO Performing db tune-up
+2019-01-22 04:23:02,724 INFO LaunchPad was RESET.
+2019-01-22 04:23:02,726 INFO Added a workflow. id_map: {-1: 1}
+2019-01-22 04:23:02,762 INFO Created new dir /home/jboes/research/catflow/launcher_2019-01-22-12-23-02-762066
+2019-01-22 04:23:02,762 INFO Launching Rocket
+2019-01-22 04:23:02,775 INFO RUNNING fw_id: 1 in directory: /home/jboes/research/catflow/launcher_2019-01-22-12-23-02-762066
+2019-01-22 04:23:02,780 INFO Task started: Equation of state v0.0.
+2019-01-22 04:23:03,365 INFO Task completed: Equation of state v0.0 
+2019-01-22 04:23:03,380 INFO Rocket finished
+:END:
